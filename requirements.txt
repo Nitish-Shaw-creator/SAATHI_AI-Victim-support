@@ -1,0 +1,7 @@
+streamlit
+numpy
+textblob
+langdetect
+deep-translator
+SpeechRecognition
+librosa
