@@ -5,4 +5,3 @@ langdetect
 deep-translator
 SpeechRecognition
 librosa
-textblob
