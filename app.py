@@ -26,9 +26,11 @@ _BENGALI_RE = re.compile(r"[\u0980-\u09FF]")
 
 
 def speech_audio_to_text(audio_bytes: bytes) -> tuple:
-    """Converts recorded microphone audio (wav bytes) into text, auto-detecting whether
-    the person spoke English, Hindi, Bengali, or Hinglish — and writes the text back in
-    that same language/script. Returns (transcript, detected_language)."""
+    """Transcribes microphone recordings using English/en-IN recognition only.
+
+    English and Hinglish speech are kept in Latin/English script. Hindi and
+    Bengali recognition/conversion is intentionally not attempted here.
+    """
     try:
         import speech_recognition as sr
     except ImportError:
@@ -48,33 +50,20 @@ def speech_audio_to_text(audio_bytes: bytes) -> tuple:
         with sr.AudioFile(tmp_path) as source:
             audio_data = recognizer.record(source)
 
-        # Try Hindi first — only accept it if the transcript actually came back in
-        # Devanagari script, which means the recognizer genuinely heard Hindi.
-        try:
-            hi_text = recognizer.recognize_google(audio_data, language="hi-IN")
-            if _DEVANAGARI_RE.search(hi_text):
-                return hi_text, "Hindi"
-        except (sr.UnknownValueError, sr.RequestError):
-            pass
-
-        # Try Bengali next — same idea, only accept it if the script matches.
-        try:
-            bn_text = recognizer.recognize_google(audio_data, language="bn-IN")
-            if _BENGALI_RE.search(bn_text):
-                return bn_text, "Bengali"
-        except (sr.UnknownValueError, sr.RequestError):
-            pass
-
-        # Fall back to English — this also naturally covers Hinglish, since both are
-        # written in Latin script and the recognizer will transcribe what it hears.
+        # Only the final English recognizer is used. This prevents Google
+        # Speech Recognition from trying to reinterpret English speech as
+        # Hindi/Bengali and returning Devanagari/Bengali text.
         try:
             en_text = recognizer.recognize_google(audio_data, language="en-IN")
             if en_text:
-                return en_text, "English"
+                return en_text, "English/Hinglish"
         except (sr.UnknownValueError, sr.RequestError):
             pass
 
-        st.warning("Sorry, the recording wasn't clear enough to understand. Please try speaking again.")
+        st.warning(
+            "Sorry, the recording wasn't clear enough to understand. "
+            "Please try speaking again."
+        )
         return "", ""
     except Exception as e:
         st.error(f"Error processing recording: {e}")
@@ -143,12 +132,14 @@ TRAUMA_LEXICON = {
 # Action Recommendation Mapping
 ACTION_MAP = {
     "Low": [
-        "Log complaint",
-        "Send self-help/counselling resources by SMS"
+        "Talk to a trusted person and keep a simple record of what happened.",
+        "For emotional support, call Tele-MANAS 14416 (24x7).",
+        "For SC/ST atrocity-related grievance support, call NHAA 14566 (24x7)."
     ],
     "Moderate": [
-        "Assign to counsellor for follow-up call within 24 hrs",
-        "Flag for district welfare officer review"
+        "Speak with a counsellor or trusted person soon; do not handle the situation alone.",
+        "For emotional support, call Tele-MANAS 14416 (24x7).",
+        "For legal help, call NALSA 15100; for SC/ST atrocity grievances, call NHAA 14566."
     ],
     "High": [
         "Immediate counsellor callback",
@@ -216,11 +207,18 @@ def voice_stress_score(audio_path: str) -> float:
         return 0.0
 
     try:
-        y, sr = librosa.load(audio_path, sr=None)
+        # Loading through librosa is the actual runtime check that the installed
+        # librosa/audio backend can read the uploaded recording.
+        y, sr = librosa.load(audio_path, sr=None, mono=True)
+
+        if y is None or len(y) == 0 or sr <= 0:
+            st.error("The uploaded recording could not be read by librosa.")
+            return 0.0
 
         # Pitch variability
         pitches, magnitudes = librosa.piptrack(y=y, sr=sr)
         pitch_values = pitches[magnitudes > np.median(magnitudes)]
+        pitch_values = pitch_values[pitch_values > 0]
         pitch_std = np.std(pitch_values) if len(pitch_values) > 0 else 0
 
         # Pause ratio
@@ -234,7 +232,7 @@ def voice_stress_score(audio_path: str) -> float:
 
         return round(pitch_component + pause_component, 2)
     except Exception as e:
-        st.error(f"Error processing audio file: {e}")
+        st.error(f"Error processing audio file with librosa: {e}")
         return 0.0
 
 
@@ -277,6 +275,7 @@ def assess_complainant(text: str, audio_path: str = None) -> dict:
         "SVI": svi,
         "risk_category": risk,
         "recommended_actions": actions,
+        "immediate_action_required": risk in ("High", "Critical"),
     }
 
 
@@ -1050,13 +1049,13 @@ I18N = {
         "pathways_subtitle": "These are options, not promises of availability. You can request a human review without selecting a pathway.",
         "choice_stays": "🧭 <b>Choice stays with you.</b> No pathway is selected automatically.",
         "pathway_counsel_title": "Counselling / emotional support",
-        "pathway_counsel_desc": "A space to talk with a trained person, if available.",
+        "pathway_counsel_desc": 'For emotional support or counselling, call Tele-MANAS 14416 (24x7). Alternate: 1800-89-14416.',
         "pathway_legal_title": "Legal aid information",
-        "pathway_legal_desc": "Understand possible next questions without making a legal determination.",
+        "pathway_legal_desc": 'For legal aid, call NALSA 15100. For SC/ST atrocity grievances, call NHAA 14566 (24x7).',
         "pathway_med_title": "Medical assistance",
-        "pathway_med_desc": "Consider care from a qualified medical professional when needed.",
+        "pathway_med_desc": 'For urgent medical or other emergency assistance, call 112.',
         "pathway_shelter_title": "Shelter / support services",
-        "pathway_shelter_desc": "Explore safety planning and local support options with a person.",
+        "pathway_shelter_desc": 'For immediate danger or emergency protection, call 112. For child-related support, call 1098.',
         "auth_review_label": "AUTHORIZED HUMAN REVIEW",
         "auth_review_title": "Request authorized human review",
         "auth_review_desc": "A reviewer can look at the safety flag, AI-derived indicators, and your words separately. This does not guarantee a real-world response.",
@@ -1168,13 +1167,13 @@ I18N = {
         "pathways_subtitle": "ये केवल विकल्प हैं, उपलब्धता का आश्वासन नहीं। आप कोई मार्ग चुने बिना भी मानव समीक्षा का अनुरोध कर सकते हैं।",
         "choice_stays": "🧭 <b>निर्णय आपका ही रहेगा।</b> कोई भी मार्ग अपने आप नहीं चुना जाता।",
         "pathway_counsel_title": "परामर्श / भावनात्मक सहायता",
-        "pathway_counsel_desc": "यदि उपलब्ध हो, तो किसी प्रशिक्षित व्यक्ति से बात करने का सुरक्षित स्थान।",
+        "pathway_counsel_desc": 'भावनात्मक सहायता या परामर्श के लिए Tele-MANAS 14416 (24x7) पर कॉल करें। वैकल्पिक: 1800-89-14416।',
         "pathway_legal_title": "कानूनी सहायता जानकारी",
-        "pathway_legal_desc": "कानूनी निर्णय किए बिना संभावित अगले सवालों को समझें।",
+        "pathway_legal_desc": 'कानूनी सहायता के लिए NALSA 15100 पर कॉल करें। SC/ST अत्याचार शिकायत के लिए NHAA 14566 (24x7) पर कॉल करें।',
         "pathway_med_title": "चिकित्सा सहायता",
-        "pathway_med_desc": "आवश्यकता पड़ने पर किसी योग्य चिकित्सक से परामर्श पर विचार करें।",
+        "pathway_med_desc": 'तत्काल चिकित्सा या अन्य आपातकालीन सहायता के लिए 112 पर कॉल करें।',
         "pathway_shelter_title": "आश्रय / सहायता सेवाएं",
-        "pathway_shelter_desc": "किसी व्यक्ति के साथ सुरक्षा योजना और स्थानीय सहायता विकल्पों का पता लगाएं।",
+        "pathway_shelter_desc": 'तत्काल खतरे या आपातकालीन सुरक्षा के लिए 112 पर कॉल करें। बच्चों से संबंधित सहायता के लिए 1098 पर कॉल करें।',
         "auth_review_label": "अधिकृत मानव समीक्षा",
         "auth_review_title": "अधिकृत मानव समीक्षा का अनुरोध करें",
         "auth_review_desc": "एक समीक्षक सुरक्षा चेतावनी, एआई-व्युत्पन्न संकेतकों और आपके शब्दों को अलग-अलग देख सकता है। यह किसी वास्तविक त्वरित कार्रवाई की गारंटी नहीं देता।",
@@ -1286,13 +1285,13 @@ I18N = {
         "pathways_subtitle": "এগুলি বিকল্প, প্রাপ্যতার প্রতিশ্রুতি নয়। কোনো পথ নির্বাচন না করেও আপনি মানবিক পর্যালোচনার অনুরোধ করতে পারেন।",
         "choice_stays": "🧭 <b>সিদ্ধান্ত আপনার হাতেই থাকে।</b> কোনো পথ স্বয়ংক্রিয়ভাবে নির্বাচিত হয় না।",
         "pathway_counsel_title": "কাউন্সেলিং / মানসিক সহায়তা",
-        "pathway_counsel_desc": "উপলব্ধ থাকলে একজন প্রশিক্ষিত ব্যক্তির সাথে কথা বলার সুযোগ।",
+        "pathway_counsel_desc": 'মানসিক সহায়তা বা কাউন্সেলিংয়ের জন্য Tele-MANAS 14416 (24x7)-এ কল করুন। বিকল্প: 1800-89-14416।',
         "pathway_legal_title": "আইনি সহায়তা তথ্য",
-        "pathway_legal_desc": "আইনি সিদ্ধান্ত না নিয়ে সম্ভাব্য পরবর্তী পদক্ষেপগুলি বুঝুন।",
+        "pathway_legal_desc": 'আইনি সহায়তার জন্য NALSA 15100-এ কল করুন। SC/ST অত্যাচারের অভিযোগের জন্য NHAA 14566 (24x7)-এ কল করুন।',
         "pathway_med_title": "চিকিৎসা সহায়তা",
-        "pathway_med_desc": "প্রয়োজন হলে একজন যোগ্যতাসম্পন্ন চিকিৎসকের পরামর্শ বিবেচনা করুন।",
+        "pathway_med_desc": 'জরুরি চিকিৎসা বা অন্য জরুরি সহায়তার জন্য 112-এ কল করুন।',
         "pathway_shelter_title": "আশ্রয় / সহায়তা পরিষেবা",
-        "pathway_shelter_desc": "কারো সাথে নিরাপত্তা পরিকল্পনা এবং স্থানীয় সহায়তা বিকল্পগুলি অন্বেষণ করুন।",
+        "pathway_shelter_desc": 'তাৎক্ষণিক বিপদ বা জরুরি সুরক্ষার জন্য 112-এ কল করুন। শিশুদের সহায়তার জন্য 1098-এ কল করুন।',
         "auth_review_label": "অনুমোদিত মানবিক পর্যালোচনা",
         "auth_review_title": "অনুমোদিত মানবিক পর্যালোচনার অনুরোধ করুন",
         "auth_review_desc": "একজন পর্যালোচক সুরক্ষা ফ্ল্যাগ, এআই নির্দেশক এবং আপনার বক্তব্য আলাদাভাবে দেখতে পারেন। এটি নিশ্চিত প্রত্যুত্তরের নিশ্চয়তা দেয় না।",
@@ -1404,13 +1403,13 @@ I18N = {
         "pathways_subtitle": "Yeh options hain, availability ka promise nahi. Aap bina koi pathway select kiye bhi human review request kar sakte hain.",
         "choice_stays": "🧭 <b>Choice hamesha aapke paas hai.</b> Koi pathway automatically select nahi hota.",
         "pathway_counsel_title": "Counselling / emotional support",
-        "pathway_counsel_desc": "Kisi trained counsellor se baat karne ka safe space, agar available ho.",
+        "pathway_counsel_desc": 'Emotional support ya counselling ke liye Tele-MANAS 14416 (24x7) par call karein. Alternate: 1800-89-14416.',
         "pathway_legal_title": "Legal aid information",
-        "pathway_legal_desc": "Bina kisi legal commitment ke aage ke steps aur options samjhein.",
+        "pathway_legal_desc": 'Legal aid ke liye NALSA 15100 par call karein. SC/ST atrocity grievance ke liye NHAA 14566 (24x7) par call karein.',
         "pathway_med_title": "Medical assistance",
-        "pathway_med_desc": "Zaroorat padne par qualified doctor ya medical professional se consult karein.",
+        "pathway_med_desc": 'Urgent medical ya doosri emergency assistance ke liye 112 par call karein.',
         "pathway_shelter_title": "Shelter / support services",
-        "pathway_shelter_desc": "Kisi person ke saath safety planning aur local support options explore karein.",
+        "pathway_shelter_desc": 'Immediate danger ya emergency protection ke liye 112 par call karein. Child-related support ke liye 1098 par call karein.',
         "auth_review_label": "AUTHORIZED HUMAN REVIEW",
         "auth_review_title": "Authorized human review request karein",
         "auth_review_desc": "Ek reviewer safety flag, AI indicators aur aapke words ko separately review kar sakta hai.",
@@ -1526,7 +1525,6 @@ _defaults = {
     "narrative_input": "",
     "audio_file": None,
     "report": None,
-    "review_requested": False,
 }
 for _k, _v in _defaults.items():
     if _k not in st.session_state:
@@ -1615,7 +1613,6 @@ def render_topbar():
             st.session_state.narrative_input = ""
             st.session_state.report = None
             st.session_state.consent_given = False
-            st.session_state.review_requested = False
             st.rerun()
 
     st.markdown(
@@ -1940,16 +1937,51 @@ def page_story():
         unsafe_allow_html=True,
     )
 
-    # Ensure narrative_input in session_state matches any existing narrative state
+    # Voice-recording mode: if a file is uploaded, the user only needs to
+    # provide the recording. The transcript is generated internally and is
+    # never placed in a text box for the user to write/edit.
+    audio_file = st.file_uploader(
+        t("audio_uploader_label"),
+        type=["wav", "mp3", "m4a"],
+        key="audio_uploader",
+    )
+    st.session_state.audio_file = audio_file
+
+    if audio_file is not None:
+        st.session_state.audio_only_mode = True
+        st.session_state.narrative = ""
+        st.session_state.narrative_input = ""
+
+        st.markdown(
+            '<div class="notice-box"><span style="font-size:1.1rem;">🎙️</span>'
+            '<span>Recording received. SAATHI will analyze the voice features and the '
+            'spoken content automatically. You do not need to type anything.</span></div>',
+            unsafe_allow_html=True,
+        )
+
+        b1, b2 = st.columns([1, 1.4])
+        with b1:
+            if st.button(t("back_btn"), use_container_width=True, key="story_back_audio"):
+                go("consent")
+        with b2:
+            if st.button(t("continue_safety"), type="primary", use_container_width=True, key="story_continue_audio"):
+                go("review")
+        return
+
+    st.session_state.audio_only_mode = False
+
+    # Existing text / microphone workflow remains unchanged when no uploaded
+    # recording is present.
+    if "show_text_writer" not in st.session_state:
+        st.session_state.show_text_writer = False
+    if "transcript_language" not in st.session_state:
+        st.session_state.transcript_language = ""
+
     if "narrative_input" not in st.session_state:
         st.session_state.narrative_input = st.session_state.get("narrative", "")
     elif st.session_state.get("narrative") and not st.session_state.narrative_input:
         st.session_state.narrative_input = st.session_state.narrative
 
-    # Apply a transcript captured on the previous run (see the mic-recorder block
-    # further below) BEFORE the text_area widget is instantiated — Streamlit does
-    # not allow writing to st.session_state[key] after that keyed widget has
-    # already been created in the same run.
     pending_transcript = st.session_state.pop("pending_transcript", "")
     pending_transcript_lang = st.session_state.pop("pending_transcript_lang", "")
     if pending_transcript:
@@ -1958,26 +1990,19 @@ def page_story():
             f"{existing_text} {pending_transcript}".strip() if existing_text else pending_transcript
         )
         st.session_state.narrative = st.session_state.narrative_input
+        # A spoken recording supplies its own transcript; do not open the
+        # manual writing box unless the user explicitly asks to write.
+        st.session_state.show_text_writer = False
 
     def prompt_to_write():
+        st.session_state.show_text_writer = True
         st.session_state.scroll_to_story_box = True
 
     def toggle_mic_recorder():
         st.session_state.show_mic_recorder = not st.session_state.get("show_mic_recorder", False)
 
-    st.markdown('<div id="story-text-anchor"></div>', unsafe_allow_html=True)
-    st.text_area(
-        "Your story",
-        height=160,
-        placeholder=t("story_placeholder"),
-        label_visibility="collapsed",
-        key="narrative_input",
-    )
-    st.session_state.narrative = st.session_state.narrative_input
-
-    if pending_transcript:
-        st.success(f"{t('transcribed_success')} ({pending_transcript_lang})")
-
+    # The text box is hidden until the user explicitly selects "Tap to write".
+    # This prevents an unused chatbot/text area from appearing automatically.
     ca, cb = st.columns([1, 1])
     with ca:
         st.button(t("speak_btn"), use_container_width=True, key="speak_btn", on_click=toggle_mic_recorder)
@@ -1989,29 +2014,33 @@ def page_story():
             key="demo_story",
         )
 
-    # "Please write something" -> scroll/focus the person to the text box above
-    if st.session_state.get("scroll_to_story_box"):
-        st.session_state.scroll_to_story_box = False
-        st.info(t("write_prompt_notice"))
-        components.html(
-            """
-            <script>
-                const doc = window.parent.document;
-                const anchor = doc.getElementById('story-text-anchor');
-                if (anchor) { anchor.scrollIntoView({behavior: 'smooth', block: 'center'}); }
-                const box = doc.querySelector('textarea');
-                if (box) { box.focus(); }
-            </script>
-            """,
-            height=0,
+    if st.session_state.get("show_text_writer", False):
+        st.markdown('<div id="story-text-anchor"></div>', unsafe_allow_html=True)
+        st.text_area(
+            "Your story",
+            height=160,
+            placeholder=t("story_placeholder"),
+            label_visibility="collapsed",
+            key="narrative_input",
         )
+        st.session_state.narrative = st.session_state.narrative_input
 
-    # Speak-to-text: record on-device, auto-detect the spoken language, and write
-    # the text back in that same language (English, Hindi, Bengali, or Hinglish).
-    # A fresh recording is transcribed once, stashed as a "pending" transcript, and
-    # applied on the NEXT run (via st.rerun()) — before the text_area is created —
-    # to satisfy the rule above. A signature of the audio bytes stops the same
-    # recording from being re-transcribed on every subsequent rerun.
+        if st.session_state.get("scroll_to_story_box"):
+            st.session_state.scroll_to_story_box = False
+            st.info(t("write_prompt_notice"))
+            components.html(
+                """
+                <script>
+                    const doc = window.parent.document;
+                    const anchor = doc.getElementById('story-text-anchor');
+                    if (anchor) { anchor.scrollIntoView({behavior: 'smooth', block: 'center'}); }
+                    const box = doc.querySelector('textarea');
+                    if (box) { box.focus(); }
+                </script>
+                """,
+                height=0,
+            )
+
     if st.session_state.get("show_mic_recorder", False):
         mic_audio = st.audio_input(t("mic_recorder_label"), key="mic_recorder")
         if mic_audio is not None:
@@ -2020,18 +2049,14 @@ def page_story():
             if audio_signature != st.session_state.get("last_transcribed_audio_sig"):
                 st.session_state.last_transcribed_audio_sig = audio_signature
                 with st.spinner(t("transcribing_label")):
+                    # Keep the transcript in the language actually detected
+                    # from the recording. Do not translate it to Hindi.
                     transcribed_text, detected_lang = speech_audio_to_text(audio_bytes)
                 if transcribed_text:
                     st.session_state.pending_transcript = transcribed_text
                     st.session_state.pending_transcript_lang = detected_lang
+                    st.session_state.transcript_language = detected_lang
                     st.rerun()
-
-    audio_file = st.file_uploader(
-        t("audio_uploader_label"),
-        type=["wav", "mp3", "m4a"],
-        key="audio_uploader",
-    )
-    st.session_state.audio_file = audio_file
 
     st.markdown(
         f"""
@@ -2048,7 +2073,7 @@ def page_story():
             go("consent")
     with b2:
         if st.button(t("continue_safety"), type="primary", use_container_width=True, key="story_continue"):
-            if not st.session_state.narrative.strip():
+            if not st.session_state.narrative.strip() and not st.session_state.get("show_mic_recorder", False):
                 st.warning(t("story_empty_warn"))
             else:
                 go("review")
@@ -2089,14 +2114,21 @@ def page_review():
         unsafe_allow_html=True,
     )
 
-    st.markdown(
-        f'<div class="transcript-box">{st.session_state.narrative}</div>',
-        unsafe_allow_html=True,
-    )
+    if st.session_state.get("audio_only_mode", False):
+        st.markdown(
+            '<div class="notice-box"><span style="font-size:1.1rem;">🎙️</span>'
+            '<span>Your recording will be analyzed automatically. No written response is required.</span></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f'<div class="transcript-box">{st.session_state.narrative}</div>',
+            unsafe_allow_html=True,
+        )
 
-    if st.button(t("edit_story_btn"), key="edit_story_review"):
-        st.session_state.narrative_input = st.session_state.narrative
-        go("story")
+        if st.button(t("edit_story_btn"), key="edit_story_review"):
+            st.session_state.narrative_input = st.session_state.narrative
+            go("story")
 
     st.markdown(
         f"""
@@ -2116,11 +2148,26 @@ def page_review():
         if st.button(t("run_screening_btn"), type="primary", use_container_width=True, key="run_screening"):
             audio_path = None
             audio_file = st.session_state.audio_file
+            audio_only = st.session_state.get("audio_only_mode", False)
+
             if audio_file is not None:
                 suffix = "." + audio_file.name.split(".")[-1]
+                audio_bytes = audio_file.getvalue()
+
                 with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                    tmp.write(audio_file.read())
+                    tmp.write(audio_bytes)
                     audio_path = tmp.name
+
+                # For uploaded recordings, speech content is transcribed internally
+                # so the user never has to type anything. The transcript is used
+                # only for scoring/safety detection and is not shown in the UI.
+                if audio_only:
+                    with st.spinner("⏳ Understanding the recording and calculating the SVI..."):
+                        transcribed_text, detected_lang = speech_audio_to_text(audio_bytes)
+                    if transcribed_text:
+                        st.session_state.narrative = transcribed_text
+                    else:
+                        st.session_state.narrative = ""
 
             with st.spinner("⏳ Analyzing language patterns and calculating stress indices..."):
                 time.sleep(0.3)
@@ -2173,11 +2220,59 @@ def _indicator_breakdown(narrative: str):
 
 
 def _immediate_danger_flag(narrative: str) -> bool:
+    """Detect explicit immediate self-harm or violence language."""
+    if not narrative or not narrative.strip():
+        return False
+
     eng_text = to_english(narrative)
     combined = f"{narrative} {eng_text}".lower()
-    combined_clean = re.sub(r"[^a-z\s]", " ", combined)
-    danger_kws = TRAUMA_LEXICON["suicidal_ideation"]["keywords"] + TRAUMA_LEXICON["violence_threat"]["keywords"]
-    return any(kw in combined_clean for kw in danger_kws)
+    combined = re.sub(r"[^a-z0-9\s]", " ", combined)
+    combined = re.sub(r"\s+", " ", combined).strip()
+
+    danger_phrases = [
+        "suicide",
+        "commit suicide",
+        "want to commit suicide",
+        "i want to commit suicide",
+        "commit suicide right now",
+        "suicide right now",
+        "want to kill myself",
+        "i want to kill myself",
+        "kill myself right now",
+        "going to kill myself",
+        "i am going to kill myself",
+        "i am suicidal",
+        "i feel suicidal",
+        "feeling suicidal",
+        "suicidal thought",
+        "suicidal thoughts",
+        "want to die",
+        "i want to die",
+        "die right now",
+        "planning to kill myself",
+        "plan to kill myself",
+        "plan to commit suicide",
+        "end my life",
+        "i want to end my life",
+        "no reason to live",
+        "kill myself",
+        "kill me",
+        "going to kill someone",
+        "going to hurt someone",
+        "threatened to kill",
+        "threatened me",
+        "murder me",
+        "weapon",
+        "gun",
+        "marna chahta",
+        "marna chahti",
+        "marna hai",
+        "jaan dena",
+        "jaan deni",
+        "mar jana",
+    ]
+
+    return any(phrase in combined for phrase in danger_phrases)
 
 
 def page_results():
@@ -2211,6 +2306,8 @@ def page_results():
 
     with right:
         danger = _immediate_danger_flag(st.session_state.narrative)
+        high_or_critical = report["risk_category"] in ("High", "Critical")
+
         if danger:
             st.markdown(
                 f"""
@@ -2218,6 +2315,18 @@ def page_results():
                     <span style="font-size:1.2rem;">⚠️</span>
                     <span><b>{t("danger_detected_title")}</b><br>
                     {t("danger_detected_desc")}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        elif high_or_critical:
+            st.markdown(
+                f"""
+                <div class="notice-box warn" style="margin-top:0;">
+                    <span style="font-size:1.2rem;">⚠️</span>
+                    <span><b>Elevated risk detected.</b><br>
+                    The SVI is in the {risk} range. Prompt human review is recommended;
+                    this prototype score is not a diagnosis.</span>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -2294,27 +2403,26 @@ def page_results():
         unsafe_allow_html=True,
     )
 
-    if st.session_state.reviewer_view:
-        st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="saathi-card">
+            <div style="font-size:0.72rem; letter-spacing:0.08em; color:var(--teal); font-weight:600; margin-bottom:6px;">
+                {t("rec_steps_heading").upper()}
+            </div>
+            <div style="font-size:1.05rem; font-weight:700; color:var(--teal-dark); margin-bottom:12px;">
+                {t("rec_steps_heading")}
+            </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    for action in report["recommended_actions"]:
+        translated_action = translate_action(action)
         st.markdown(
-            f"""
-            <div class="reviewer-panel">
-                <div style="font-size:0.72rem; letter-spacing:0.08em; color:var(--teal); font-weight:600; margin-bottom:6px;">
-                    {t("reviewer_view").upper()}
-                </div>
-                <div style="font-size:1.05rem; font-weight:700; color:var(--teal-dark); margin-bottom:12px;">
-                    {t("rec_steps_heading")}
-                </div>
-            """,
+            f'<div style="padding:6px 0; font-size:0.92rem; color:var(--teal-dark);">→ {translated_action}</div>',
             unsafe_allow_html=True,
         )
-        for action in report["recommended_actions"]:
-            translated_action = translate_action(action)
-            st.markdown(
-                f'<div style="padding:6px 0; font-size:0.92rem; color:var(--teal-dark);">→ {translated_action}</div>',
-                unsafe_allow_html=True,
-            )
-        st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
 
     st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
@@ -2324,6 +2432,11 @@ def page_results():
             st.session_state.narrative = ""
             st.session_state.narrative_input = ""
             st.session_state.report = None
+            st.session_state.audio_only_mode = False
+            st.session_state.audio_file = None
+            st.session_state.show_text_writer = False
+            st.session_state.show_mic_recorder = False
+            st.session_state.transcript_language = ""
             go("consent")
     with b2:
         if st.button(t("choose_pathway"), type="primary", use_container_width=True, key="go_pathways"):
@@ -2378,37 +2491,19 @@ def page_pathways():
 
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-    st.markdown(
-        f"""
-        <div class="reviewer-panel">
-            <div style="font-size:0.72rem; letter-spacing:0.08em; color:var(--teal); font-weight:600; margin-bottom:4px;">
-                {t("auth_review_label")}
-            </div>
-            <div style="font-size:1.15rem; font-weight:700; color:var(--teal-dark); margin-bottom:8px;">
-                {t("auth_review_title")}
-            </div>
-            <p style="font-size:0.9rem; color:var(--muted); line-height:1.5; margin-bottom:0;">
-                {t("auth_review_desc")}
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    b1, b2, b3 = st.columns(3)
+    b1, b2 = st.columns(2)
     with b1:
-        if st.button(t("request_review_btn"), type="primary", use_container_width=True, key="request_review"):
-            with st.spinner("⏳ Routing request to authorized human reviewer..."):
-                time.sleep(0.4)
-                st.session_state.review_requested = True
-            st.success(t("review_success"))
-    with b2:
         if st.button(t("start_another"), use_container_width=True, key="path_another"):
             st.session_state.narrative = ""
             st.session_state.narrative_input = ""
             st.session_state.report = None
+            st.session_state.audio_only_mode = False
+            st.session_state.audio_file = None
+            st.session_state.show_text_writer = False
+            st.session_state.show_mic_recorder = False
+            st.session_state.transcript_language = ""
             go("consent")
-    with b3:
+    with b2:
         if st.button(t("view_case_status"), use_container_width=True, key="view_status"):
             if report:
                 status_risk = t(f"risk_{report['risk_category'].lower()}")
