@@ -1646,18 +1646,6 @@ def render_steps(current):
     st.markdown(html, unsafe_allow_html=True)
 
 
-def safety_notice_landing():
-    st.markdown(
-        f"""
-        <div class="notice-box">
-            <span style="font-size:1.15rem;">🛡️</span>
-            <span>{t("emergency_notice")}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def _circular_gauge(score: float, risk: str, color: str) -> str:
     """SVG circular progress gauge for SVI."""
     pct = min(max(score / 100, 0), 1)
@@ -1714,8 +1702,6 @@ def page_landing():
             st.session_state.narrative = demo_text
             st.session_state.narrative_input = demo_text
             go("consent")
-
-    safety_notice_landing()
 
     st.markdown(
         f"""
