@@ -15,7 +15,7 @@ import tempfile
 import time
 import numpy as np
 import streamlit as st
-import streamlit.components.v1 as components
+from streamlit_geolocation import streamlit_geolocation
 from textblob import TextBlob
 from langdetect import detect
 from deep_translator import GoogleTranslator
@@ -153,6 +153,67 @@ ACTION_MAP = {
         "Escalate to District Administration & SC/ST Protection Cell"
     ],
 }
+
+
+# =============================================================================
+# 1b. DEMO ALERT ROUTING — keyword -> which authority SAATHI would notify
+# =============================================================================
+# NOTE: This is a PROTOTYPE / DEMO feature only. No real message, SMS, email,
+# or API call is ever sent to NHAA, the police, or a hospital. The "alert" is
+# only rendered on-screen so reviewers can see how routing would work.
+ALERT_ROUTES = {
+    "discrimination": {
+        "recipient": "NHAA (National Human Rights / Atrocity Helpline — 14566)",
+        "keywords": [
+            "discriminat", "boycott", "outcast", "untouchab", "caste", "casteist", "casteism", "caste based",
+            "denied entry", "excluded", "alag thalag", "chhua chhut",
+        ],
+    },
+    "crime": {
+        "recipient": "Police",
+        "keywords": [
+            "rape", "gang rape", "molest", "sexually assaulted", "balatkar", "chhedchhad",
+            "murder", "assault", "attacked", "gun", "weapon", "maar dalunga", "hamla",
+            "kidnap", "kidnapped",
+        ],
+    },
+    "medical_emergency": {
+        "recipient": "Hospital / Emergency Medical Services",
+        "keywords": [
+            "suicide", "kill myself", "end my life", "want to die", "no reason to live",
+            "overdose", "bleeding", "unconscious", "jaan dena", "mar jana",
+            "marna chahta", "marna chahti", "marne",
+        ],
+    },
+}
+
+
+def detect_alert_triggers(narrative: str) -> list:
+    """Scans the (English-translated) narrative for alert-route keywords.
+
+    Returns a list of dicts: {"category", "recipient", "matched_keyword"}.
+    Used only to render a DEMO on-screen notice — never sends anything.
+    """
+    if not narrative or not narrative.strip():
+        return []
+
+    eng_text = to_english(narrative)
+    combined = f"{narrative} {eng_text}".lower()
+
+    triggered = []
+    seen_recipients = set()
+    for category, data in ALERT_ROUTES.items():
+        for kw in data["keywords"]:
+            if kw in combined:
+                if data["recipient"] not in seen_recipients:
+                    triggered.append({
+                        "category": category,
+                        "recipient": data["recipient"],
+                        "matched_keyword": kw,
+                    })
+                    seen_recipients.add(data["recipient"])
+                break
+    return triggered
 
 
 def translate_to_english_local(text: str, source_lang: str) -> str:
@@ -1516,7 +1577,7 @@ def get_sample_story() -> str:
 # Session state
 # ---------------------------------------------------------------------------
 _defaults = {
-    "step": "landing",
+    "step": "location_gate",
     "language": "English",
     "lang_select": "English",
     "reviewer_view": False,
@@ -1525,6 +1586,19 @@ _defaults = {
     "narrative_input": "",
     "audio_file": None,
     "report": None,
+    # --- Location permission gate (asked before the site opens) ---
+    "location_choice_made": False,
+    "location_shared": False,
+    "user_lat": None,
+    "user_lng": None,
+    # --- Legal / liability disclaimer (first screen) ---
+    "legal_ack": False,
+    # --- Personal details collected right after the disclaimer ---
+    "user_details_submitted": False,
+    "full_name": "",
+    "mobile_number": "",
+    "address": "",
+    "belongings_number": "",
 }
 for _k, _v in _defaults.items():
     if _k not in st.session_state:
@@ -1646,6 +1720,18 @@ def render_steps(current):
     st.markdown(html, unsafe_allow_html=True)
 
 
+def safety_notice_landing():
+    st.markdown(
+        f"""
+        <div class="notice-box">
+            <span style="font-size:1.15rem;">🛡️</span>
+            <span>{t("emergency_notice")}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _circular_gauge(score: float, risk: str, color: str) -> str:
     """SVG circular progress gauge for SVI."""
     pct = min(max(score / 100, 0), 1)
@@ -1684,6 +1770,123 @@ def _circular_gauge(score: float, risk: str, color: str) -> str:
 # ---------------------------------------------------------------------------
 # Pages
 # ---------------------------------------------------------------------------
+def page_location_gate():
+    """First screen shown before the rest of the site opens: ask permission
+    to use the device location so nearby help can be located."""
+    st.markdown("### Turn on your location?")
+    st.write(
+        "SAATHI can use your device location to help point you to nearby "
+        "police stations, hospitals, or shelters. This is optional."
+    )
+
+    c1, c2 = st.columns([1.4, 1])
+
+    with c1:
+        # This component handles the browser location permission.
+        location = streamlit_geolocation()
+
+        if location and location.get("latitude") is not None and location.get("longitude") is not None:
+            st.session_state.user_lat = location["latitude"]
+            st.session_state.user_lng = location["longitude"]
+            st.session_state.location_shared = True
+            st.session_state.location_choice_made = True
+
+    with c2:
+        if st.button("Skip for now", use_container_width=True, key="skip_location"):
+            st.session_state.location_choice_made = True
+            st.session_state.location_shared = False
+            go("legal_notice")
+
+    if st.session_state.get("location_shared") and st.session_state.get("user_lat") is not None:
+        lat = st.session_state.user_lat
+        lng = st.session_state.user_lng
+
+        st.success(f"Location shared: {lat}, {lng}")
+
+        if st.button("Continue →", type="primary", use_container_width=True, key="continue_after_location"):
+            go("legal_notice")
+
+
+def page_legal_notice():
+    """Liability / accuracy disclaimer shown before anything else on the site."""
+    st.markdown(f'<div class="eyebrow">BEFORE YOU CONTINUE</div>', unsafe_allow_html=True)
+    st.markdown("### Please read this notice")
+    st.markdown(
+        '<div class="subtitle">You must agree to the notice below before using SAATHI.</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        """
+        <div class="saathi-card">
+            <p style="color:var(--teal-dark); font-size:0.98rem; line-height:1.65; font-weight:600;">
+                Everything you share here must be true and accurate to the best of your knowledge.
+                SAATHI is a support and screening prototype only — it is not a substitute for
+                professional medical, legal, or law-enforcement services. We (SAATHI / NHAA and
+                this prototype's developers) are not responsible for any decisions, actions, losses,
+                or outcomes arising from the use of this tool, or from information that is
+                incomplete, inaccurate, or misrepresented by the user. By continuing, you confirm
+                that everything you enter is true, and you accept that this tool does not guarantee
+                any particular outcome, response time, or result.
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.session_state.legal_ack = st.checkbox(
+        "I confirm everything I submit will be true, and I understand SAATHI and its "
+        "developers are not responsible for any outcome arising from my use of this tool.",
+        value=st.session_state.legal_ack,
+        key="legal_ack_checkbox",
+    )
+
+    c1, c2 = st.columns([1, 1.4])
+    with c1:
+        if st.button("Back", use_container_width=True, key="legal_back"):
+            go("location_gate")
+    with c2:
+        if st.button("I agree — continue", type="primary", use_container_width=True,
+                      disabled=not st.session_state.legal_ack, key="legal_continue"):
+            go("user_details")
+
+
+def page_user_details():
+    """Collects basic identifying details before the rest of the app opens."""
+    st.markdown(f'<div class="eyebrow">YOUR DETAILS</div>', unsafe_allow_html=True)
+    st.markdown("### A few details before we begin")
+    st.markdown(
+        '<div class="subtitle">This helps SAATHI reach you or the right help if needed. '
+        'Please fill this in truthfully.</div>',
+        unsafe_allow_html=True,
+    )
+
+    with st.form("user_details_form"):
+        full_name = st.text_input("Full name", value=st.session_state.full_name)
+        mobile_number = st.text_input("Mobile number", value=st.session_state.mobile_number)
+        address = st.text_area("Address", value=st.session_state.address)
+        belongings_number = st.text_input(
+            "Belongings number",
+            value=st.session_state.belongings_number,
+            help="ID / reference number for your belongings, if applicable.",
+        )
+        submitted = st.form_submit_button("Continue →", type="primary", use_container_width=True)
+
+    if submitted:
+        if not full_name.strip() or not mobile_number.strip():
+            st.error("Please fill in at least your full name and mobile number.")
+        else:
+            st.session_state.full_name = full_name.strip()
+            st.session_state.mobile_number = mobile_number.strip()
+            st.session_state.address = address.strip()
+            st.session_state.belongings_number = belongings_number.strip()
+            st.session_state.user_details_submitted = True
+            go("landing")
+
+    if st.button("Back", key="details_back"):
+        go("legal_notice")
+
+
 def page_landing():
     st.markdown(f'<div class="eyebrow">{t("landing_eyebrow")}</div>', unsafe_allow_html=True)
     st.markdown(f"#{t('landing_title')}")
@@ -1702,6 +1905,8 @@ def page_landing():
             st.session_state.narrative = demo_text
             st.session_state.narrative_input = demo_text
             go("consent")
+
+    safety_notice_landing()
 
     st.markdown(
         f"""
@@ -2014,18 +2219,6 @@ def page_story():
         if st.session_state.get("scroll_to_story_box"):
             st.session_state.scroll_to_story_box = False
             st.info(t("write_prompt_notice"))
-            components.html(
-                """
-                <script>
-                    const doc = window.parent.document;
-                    const anchor = doc.getElementById('story-text-anchor');
-                    if (anchor) { anchor.scrollIntoView({behavior: 'smooth', block: 'center'}); }
-                    const box = doc.querySelector('textarea');
-                    if (box) { box.focus(); }
-                </script>
-                """,
-                height=0,
-            )
 
     if st.session_state.get("show_mic_recorder", False):
         mic_audio = st.audio_input(t("mic_recorder_label"), key="mic_recorder")
@@ -2261,6 +2454,98 @@ def _immediate_danger_flag(narrative: str) -> bool:
     return any(phrase in combined for phrase in danger_phrases)
 
 
+def render_high_svi_alerts(narrative: str, risk: str):
+    """Show prototype case-routing messages for High/Critical SVI results."""
+    if risk not in ("High", "Critical"):
+        return
+
+    triggers = detect_alert_triggers(narrative)
+    if not triggers:
+        return
+
+    # Prefer the user's entered address. Use the captured live coordinates
+    # when an address was not provided.
+    area = st.session_state.get("address", "").strip()
+    lat = st.session_state.get("user_lat")
+    lng = st.session_state.get("user_lng")
+
+    if area:
+        area_text = area
+    elif lat is not None and lng is not None:
+        area_text = f"Live location ({lat}, {lng})"
+    else:
+        area_text = "Location not provided"
+
+    location_url = None
+    if lat is not None and lng is not None:
+        location_url = f"https://www.google.com/maps?q={lat},{lng}"
+
+    categories = {item["category"] for item in triggers}
+
+    st.markdown("### 🚨 Emergency case routing")
+
+    # NHAA — discrimination / caste-related concerns
+    if "discrimination" in categories:
+        st.success(
+            f"**Your case has been sent to NHAA (14566).**\n\n"
+            f"**Concern:** Discrimination / caste-related issue  \n"
+            f"**Area:** {area_text}"
+        )
+        st.link_button(
+            "Open NHAA case portal ↗",
+            "https://nhapoa.gov.in/",
+            use_container_width=True,
+        )
+        if location_url:
+            st.link_button(
+                "View live location used for this case ↗",
+                location_url,
+                use_container_width=True,
+            )
+
+    # Police — violence / crime / threat
+    if "crime" in categories:
+        st.warning(
+            f"**Your case has been sent to Police Emergency Response (112).**\n\n"
+            f"**Concern:** Violence / crime / threat  \n"
+            f"**Area:** {area_text}"
+        )
+        st.link_button(
+            "Open Police / 112 emergency portal ↗",
+            "https://112.gov.in/",
+            use_container_width=True,
+        )
+        if location_url:
+            st.link_button(
+                "View live location used for this case ↗",
+                location_url,
+                use_container_width=True,
+            )
+
+    # Hospital / ambulance — suicide or other medical emergency
+    if "medical_emergency" in categories:
+        st.error(
+            f"**Your case has been sent to Hospital / Ambulance Emergency Response (112).**\n\n"
+            f"**Concern:** Suicide / self-harm / medical emergency  \n"
+            f"**Area:** {area_text}"
+        )
+        st.link_button(
+            "Open Ambulance / 112 emergency portal ↗",
+            "https://112.gov.in/",
+            use_container_width=True,
+        )
+        if location_url:
+            st.link_button(
+                "View live location used for this case ↗",
+                location_url,
+                use_container_width=True,
+            )
+
+    st.caption(
+        "Prototype demo: the alert is shown as a simulated case submission. "
+        "No real complaint or emergency request is submitted from this prototype."
+    )
+
 def page_results():
     if st.session_state.report is None:
         go("landing")
@@ -2269,6 +2554,9 @@ def page_results():
     report = st.session_state.report
     risk = report["risk_category"]
     color = RISK_COLORS[risk]
+
+    # Show routing notices at the top of the results screen for High/Critical SVI.
+    render_high_svi_alerts(st.session_state.narrative, risk)
 
     st.markdown(f'<div class="eyebrow">{t("results_eyebrow")}</div>', unsafe_allow_html=True)
 
@@ -2328,6 +2616,7 @@ def page_results():
                 """,
                 unsafe_allow_html=True,
             )
+
 
         sig1, sig2 = st.columns(2)
         with sig1:
@@ -2509,6 +2798,9 @@ def page_pathways():
 render_topbar()
 
 _router = {
+    "location_gate": page_location_gate,
+    "legal_notice": page_legal_notice,
+    "user_details": page_user_details,
     "landing": page_landing,
     "consent": page_consent,
     "story": page_story,
@@ -2516,4 +2808,4 @@ _router = {
     "results": page_results,
     "pathways": page_pathways,
 }
-_router.get(st.session_state.step, page_landing)()
+_router.get(st.session_state.step, page_location_gate)()
